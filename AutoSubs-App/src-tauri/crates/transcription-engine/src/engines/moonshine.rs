@@ -86,6 +86,9 @@ pub async fn transcribe_moonshine(
     let mut segments: Vec<Segment> = Vec::new();
 
     for (i, speech_segment) in expanded.iter().enumerate() {
+        // We use `.collect()` instead of reusing a pre-allocated vector because `engine.transcribe_samples`
+        // takes ownership of `Vec<f32>` (from the `transcribe-rs` API), consuming the allocation.
+        // `.collect()` on an ExactSizeIterator is the most efficient way to fulfill this ownership requirement.
         let samples: Vec<f32> = speech_segment.samples
             .iter()
             .map(|&s| s as f32 / 32768.0)

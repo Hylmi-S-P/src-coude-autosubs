@@ -264,7 +264,9 @@ fn main() {
                                 body.len()
                             );
                             if let Ok(mut stream) = TcpStream::connect_timeout(
-                                &"127.0.0.1:56002".parse().unwrap(),
+                                &"127.0.0.1:56002"
+                                    .parse()
+                                    .expect("failed to parse localhost address"),
                                 Duration::from_millis(400),
                             ) {
                                 let _ = stream.set_nodelay(true);

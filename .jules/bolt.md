@@ -1,0 +1,3 @@
+## 2026-04-22 - React.memo on complex list items with derived state
+**Learning:** When attempting to optimize a long list in React (like `SubtitleList`) by using `React.memo` on child items, passing mutable top-level state (like `draftText` and the entire `subtitles` array) to all child components defeats the memoization, as they will all update simultaneously.
+**Action:** Ensure that memoized child components only receive the specific data they need. For example, instead of passing the entire `subtitles` array or raw `draftText`, pass only `isSelected ? draftText : ""` to prevent unnecessary updates to non-selected items. Also avoid passing the full `subtitles` array down if a localized update callback (`updateSubtitleText`) can be used.

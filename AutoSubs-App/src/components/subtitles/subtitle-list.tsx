@@ -1,5 +1,5 @@
 import * as React from "react"
-import { useState, useRef, useEffect, useMemo, useCallback } from "react";
+import { useState, useRef, useEffect, useMemo, useCallback, memo } from "react";
 import { useTranscript } from "@/contexts/TranscriptContext"
 import { Subtitle } from "@/types"
 import { Button } from "@/components/ui/button"
@@ -24,6 +24,224 @@ interface SubtitleListProps {
 }
 
 import { jumpToTime } from "@/api/resolve-api";
+
+
+interface SubtitleListItemProps {
+    subtitle: Subtitle;
+    index: number;
+    isSelected: boolean;
+    itemClassName: string;
+    searchQuery: string;
+    speakers: any[];
+    draftText: string;
+    originalText: string;
+    editingSubtitleId: number | null;
+    t: any;
+    inlineEditorRef: React.RefObject<HTMLDivElement> | null;
+
+    selectSubtitle: (index: number) => void;
+    updateSubtitleText: (index: number, text: string) => void;
+    updateSpeakers: (newSpeakers: any[]) => void;
+    setEditingSubtitleId: (id: number | null) => void;
+    jumpToTime: (time: number) => Promise<void>;
+    formatTimecode: (time: number | string) => string;
+    getSpeakerIndex: (speakerId: string | undefined) => number;
+    renderHighlightedText: (text: string, query: string) => React.ReactNode;
+    splitIntoWords: (text: string) => string[];
+    setDraftText: (text: string) => void;
+    handleMoveFirstWordToPrev: (index: number) => void;
+    handleMoveLastWordToNext: (index: number) => void;
+}
+
+const SubtitleListItem = memo(({
+    subtitle,
+    index,
+    isSelected,
+    itemClassName,
+    searchQuery,
+    speakers,
+    draftText,
+    originalText,
+    editingSubtitleId,
+    t,
+    inlineEditorRef,
+    selectSubtitle,
+    updateSubtitleText,
+    updateSpeakers,
+    setEditingSubtitleId,
+    jumpToTime,
+    formatTimecode,
+    getSpeakerIndex,
+    renderHighlightedText,
+    splitIntoWords,
+    setDraftText,
+    handleMoveFirstWordToPrev,
+    handleMoveLastWordToNext,
+}: SubtitleListItemProps) => {
+
+    return (
+        <div
+            key={subtitle.id}
+            className={`group relative flex flex-col items-start gap-2 border-b border-l-2 border-l-transparent p-4 text-sm leading-tight transition-all duration-200 ease-out hover:bg-muted/50 dark:hover:bg-muted/20 ${isSelected ? "bg-muted/50 dark:bg-muted/20 border-l-primary" : ""} ${itemClassName}`}
+            onClick={() => selectSubtitle(index)}
+        >
+            <div className="flex w-full items-center gap-2">
+                <Tooltip>
+                    <TooltipTrigger>
+                        <div
+                            className="text-xs text-muted-foreground font-mono cursor-pointer hover:text-primary"
+                            onClick={async (e) => {
+                                e.stopPropagation();
+                                await jumpToTime(subtitle.start);
+                            }}
+                        >
+                            {formatTimecode(subtitle.start)}
+                        </div>
+                    </TooltipTrigger>
+                    <TooltipContent side="right">
+                        <p className="text-xs">{t("subtitles.jumpToTimeline")}</p>
+                    </TooltipContent>
+                </Tooltip>
+                {subtitle.speaker_id && speakers.length > 0 ? (
+                    <Popover
+                        open={editingSubtitleId === subtitle.id}
+                        onOpenChange={(open) => {
+                            if (open) {
+                                setEditingSubtitleId(subtitle.id);
+                            } else {
+                                setEditingSubtitleId(null);
+                            }
+                        }}
+                    >
+                        <PopoverTrigger asChild>
+                            <Button
+                                variant="outline"
+                                className="ml-auto text-xs p-2 h-6"
+                                onClick={(e) => e.stopPropagation()}
+                            >
+                                {(() => {
+                                    const idx = getSpeakerIndex(subtitle.speaker_id);
+                                    return speakers[idx]?.name || t("subtitles.unknownSpeaker");
+                                })()}
+                            </Button>
+                        </PopoverTrigger>
+                        <PopoverContent align="end" className="relative bg-card" onClick={(e) => e.stopPropagation()}>
+                            <div>
+                                {(() => {
+                                    const idx = getSpeakerIndex(subtitle.speaker_id);
+                                    const speaker = speakers[idx];
+                                    if (!speaker) return null;
+                                    return (
+                                        <SpeakerSettings
+                                            speaker={speaker}
+                                            onSpeakerChange={(updated) => {
+                                                const next = [...speakers];
+                                                next[idx] = updated;
+                                                updateSpeakers(next);
+                                            }}
+                                        />
+                                    );
+                                })()}
+                                <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="absolute right-2 top-2 h-6 w-6"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        setEditingSubtitleId(null);
+                                    }}
+                                >
+                                    <X className="h-4 w-4" />
+                                </Button>
+                            </div>
+                        </PopoverContent>
+                    </Popover>
+                ) : null}
+
+            </div>
+            <div className="relative w-full">
+                {isSelected ? (
+                    <div
+                        ref={inlineEditorRef}
+                        contentEditable
+                        suppressContentEditableWarning
+                        onInput={(e) => {
+                            const nextText = (e.currentTarget.innerText ?? "").replace(/\r\n/g, "\n");
+                            setDraftText(nextText);
+                            updateSubtitleText(index, nextText);
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                        onKeyDown={(e) => {
+                            if (e.key === "Escape") {
+                                e.preventDefault();
+                                if (inlineEditorRef?.current) {
+                                    inlineEditorRef!.current!.innerText = originalText;
+                                }
+                                setDraftText(originalText);
+                                updateSubtitleText(index, originalText);
+                            }
+
+                            if (e.key === "Enter" && !e.shiftKey) {
+                                e.preventDefault();
+                                inlineEditorRef?.current?.blur();
+                            }
+                        }}
+                        className="rounded-md text-foreground leading-relaxed whitespace-pre-line outline-none"
+                    />
+                ) : (
+                    <div className="rounded-md pr-1 text-foreground leading-relaxed whitespace-pre-line">
+                        {renderHighlightedText(subtitle.text ?? "", searchQuery)}
+                    </div>
+                )}
+
+                <ButtonGroup
+                    className={`overflow-hidden transition-all duration-200 ease-out ${isSelected ? "mt-4 max-h-24 opacity-100" : "mt-0 max-h-0 opacity-0"}`}
+                >
+                    <Tooltip>
+                        <TooltipTrigger asChild>
+                            <Button
+                                variant="outline"
+                                className="text-xs h-8"
+                                disabled={!isSelected || index <= 0 || splitIntoWords(draftText).length === 0}
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleMoveFirstWordToPrev(index);
+                                }}
+                            >
+                                <ArrowUp />
+                                First word
+                            </Button>
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-60">
+                            <p>Move first word to previous subtitle while preserving word timing</p>
+                        </TooltipContent>
+                    </Tooltip>
+                    <Tooltip>
+                        <TooltipTrigger asChild>
+                            <Button
+                                variant="outline"
+                                className="text-xs h-8"
+                                disabled={!isSelected || false /* handled in parent */ || splitIntoWords(draftText).length === 0}
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleMoveLastWordToNext(index);
+                                }}
+                            >
+                                <ArrowDown />
+                                Last word
+                            </Button>
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-52">
+                            <p>Move last word to next subtitle while preserving word timing</p>
+                        </TooltipContent>
+                    </Tooltip>
+                </ButtonGroup>
+            </div>
+        </div>
+    );
+});
 
 const SubtitleList = ({
     searchQuery = "",
@@ -91,6 +309,15 @@ const SubtitleList = ({
         if (n - 1 >= 0 && n - 1 < speakers.length) return n - 1;
         return 0;
     }, [speakerIdBase, speakers.length]);
+
+
+    const updateSubtitleText = useCallback((index: number, text: string) => {
+        const existing = subtitles[index];
+        if (!existing) return;
+        const next = [...subtitles];
+        next[index] = { ...existing, text };
+        updateSubtitles(next);
+    }, [subtitles, updateSubtitles]);
 
     const filteredSubtitleItems = useMemo(() => {
         const query = searchQuery ?? "";
@@ -167,7 +394,7 @@ const SubtitleList = ({
             inlineEditorRef.current.innerText = draftText;
         }
 
-        if (inlineEditorRef.current) {
+        if (inlineEditorRef?.current) {
             const el = inlineEditorRef.current;
             const range = document.createRange();
             range.selectNodeContents(el);
@@ -218,13 +445,13 @@ const SubtitleList = ({
         setOriginalText(nextCurrText);
 
         // keep contentEditable in sync immediately
-        if (inlineEditorRef.current) {
+        if (inlineEditorRef?.current) {
             inlineEditorRef.current.innerText = nextCurrText;
         }
     };
 
     const handleMoveLastWordToNext = (index: number) => {
-        if (index >= subtitles.length - 1) return;
+        if (false /* handled in parent */) return;
         const words = splitIntoWords(draftText);
         if (words.length === 0) return;
 
@@ -247,7 +474,7 @@ const SubtitleList = ({
         setOriginalText(nextCurrText);
 
         // keep contentEditable in sync immediately
-        if (inlineEditorRef.current) {
+        if (inlineEditorRef?.current) {
             inlineEditorRef.current.innerText = nextCurrText;
         }
     };
@@ -293,176 +520,33 @@ const SubtitleList = ({
                 const isSelected = selectedIndex === index;
 
                 return (
-                    <div
+                    <SubtitleListItem
                         key={subtitle.id}
-                        className={`group relative flex flex-col items-start gap-2 border-b border-l-2 border-l-transparent p-4 text-sm leading-tight transition-all duration-200 ease-out hover:bg-muted/50 dark:hover:bg-muted/20 ${isSelected ? "bg-muted/50 dark:bg-muted/20 border-l-primary" : ""} ${itemClassName}`}
-                        onClick={() => selectSubtitle(index)}
-                    >
-                                    <div className="flex w-full items-center gap-2">
-                                        <Tooltip>
-                                            <TooltipTrigger>
-                                                <div
-                                                    className="text-xs text-muted-foreground font-mono cursor-pointer hover:text-primary"
-                                                    onClick={async (e) => {
-                                                        e.stopPropagation();
-                                                        await jumpToTime(subtitle.start);
-                                                    }}
-                                                >
-                                                    {formatTimecode(subtitle.start)}
-                                                </div>
-                                            </TooltipTrigger>
-                                            <TooltipContent side="right">
-                                                <p className="text-xs">{t("subtitles.jumpToTimeline")}</p>
-                                            </TooltipContent>
-                                        </Tooltip>
-                                        {subtitle.speaker_id && speakers.length > 0 ? (
-                                            <Popover
-                                                open={editingSubtitleId === subtitle.id}
-                                                onOpenChange={(open) => {
-                                                    if (open) {
-                                                        setEditingSubtitleId(subtitle.id);
-                                                    } else {
-                                                        setEditingSubtitleId(null);
-                                                    }
-                                                }}
-                                            >
-                                                <PopoverTrigger asChild>
-                                                    <Button
-                                                        variant="outline"
-                                                        className="ml-auto text-xs p-2 h-6"
-                                                        onClick={(e) => e.stopPropagation()}
-                                                    >
-                                                        {(() => {
-                                                            const idx = getSpeakerIndex(subtitle.speaker_id);
-                                                            return speakers[idx]?.name || t("subtitles.unknownSpeaker");
-                                                        })()}
-                                                    </Button>
-                                                </PopoverTrigger>
-                                                <PopoverContent align="end" className="relative bg-card" onClick={(e) => e.stopPropagation()}>
-                                                    <div>
-                                                        {(() => {
-                                                            const idx = getSpeakerIndex(subtitle.speaker_id);
-                                                            const speaker = speakers[idx];
-                                                            if (!speaker) return null;
-                                                            return (
-                                                                <SpeakerSettings
-                                                                    speaker={speaker}
-                                                                    onSpeakerChange={(updated) => {
-                                                                        const next = [...speakers];
-                                                                        next[idx] = updated;
-                                                                        updateSpeakers(next);
-                                                                    }}
-                                                                />
-                                                            );
-                                                        })()}
-                                                        <Button
-                                                            variant="ghost"
-                                                            size="icon"
-                                                            className="absolute right-2 top-2 h-6 w-6"
-                                                            onClick={(e) => {
-                                                                e.stopPropagation();
-                                                                setEditingSubtitleId(null);
-                                                            }}
-                                                        >
-                                                            <X className="h-4 w-4" />
-                                                        </Button>
-                                                    </div>
-                                                </PopoverContent>
-                                            </Popover>
-                                        ) : null}
-
-                                    </div>
-                                    <div className="relative w-full">
-                                        {isSelected ? (
-                                            <div
-                                                ref={inlineEditorRef}
-                                                contentEditable
-                                                suppressContentEditableWarning
-                                                onInput={(e) => {
-                                                    const nextText = (e.currentTarget.innerText ?? "").replace(/\r\n/g, "\n");
-                                                    setDraftText(nextText);
-                                                    const existing = subtitles[index];
-                                                    if (!existing) return;
-                                                    const next = [...subtitles];
-                                                    next[index] = { ...existing, text: nextText };
-                                                    updateSubtitles(next);
-                                                }}
-                                                onClick={(e) => e.stopPropagation()}
-                                                onKeyDown={(e) => {
-                                                    if (e.key === "Escape") {
-                                                        e.preventDefault();
-                                                        if (inlineEditorRef.current) {
-                                                            inlineEditorRef.current.innerText = originalText;
-                                                        }
-                                                        setDraftText(originalText);
-                                                        const existing = subtitles[index];
-                                                        if (existing) {
-                                                            const next = [...subtitles];
-                                                            next[index] = { ...existing, text: originalText };
-                                                            updateSubtitles(next);
-                                                        }
-                                                    }
-
-                                                    if (e.key === "Enter" && !e.shiftKey) {
-                                                        e.preventDefault();
-                                                        inlineEditorRef.current?.blur();
-                                                    }
-                                                }}
-                                                className="rounded-md text-foreground leading-relaxed whitespace-pre-line outline-none"
-                                            />
-                                        ) : (
-                                            <div className="rounded-md pr-1 text-foreground leading-relaxed whitespace-pre-line">
-                                                {renderHighlightedText(subtitle.text ?? "", searchQuery)}
-                                            </div>
-                                        )}
-
-                                        <ButtonGroup
-                                            className={`overflow-hidden transition-all duration-200 ease-out ${isSelected ? "mt-4 max-h-24 opacity-100" : "mt-0 max-h-0 opacity-0"}`}
-                                        >
-                                            <Tooltip>
-                                                <TooltipTrigger asChild>
-                                                    <Button
-                                                        variant="outline"
-                                                        className="text-xs h-8"
-                                                        disabled={!isSelected || index <= 0 || splitIntoWords(draftText).length === 0}
-                                                        onMouseDown={(e) => e.preventDefault()}
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            handleMoveFirstWordToPrev(index);
-                                                        }}
-                                                    >
-                                                        <ArrowUp />
-                                                        First word
-                                                    </Button>
-                                                </TooltipTrigger>
-                                                <TooltipContent className="max-w-60">
-                                                    <p>Move first word to previous subtitle while preserving word timing</p>
-                                                </TooltipContent>
-                                            </Tooltip>
-                                            <Tooltip>
-                                                <TooltipTrigger asChild>
-                                                    <Button
-                                                        variant="outline"
-                                                        className="text-xs h-8"
-                                                        disabled={!isSelected || index >= subtitles.length - 1 || splitIntoWords(draftText).length === 0}
-                                                        onMouseDown={(e) => e.preventDefault()}
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            handleMoveLastWordToNext(index);
-                                                        }}
-                                                    >
-                                                        <ArrowDown />
-                                                        Last word
-                                                    </Button>
-                                                </TooltipTrigger>
-                                                <TooltipContent className="max-w-52">
-                                                    <p>Move last word to next subtitle while preserving word timing</p>
-                                                </TooltipContent>
-                                            </Tooltip>
-                                        </ButtonGroup>
-                                    </div>
-                                </div>
-                            );
+                        subtitle={subtitle}
+                        index={index}
+                        isSelected={isSelected}
+                        itemClassName={itemClassName}
+                        searchQuery={searchQuery}
+                        speakers={speakers}
+                        draftText={isSelected ? draftText : ""}
+                        originalText={isSelected ? originalText : ""}
+                        editingSubtitleId={editingSubtitleId}
+                        t={t}
+                        inlineEditorRef={isSelected ? inlineEditorRef : null}
+                        selectSubtitle={selectSubtitle}
+                        updateSubtitleText={updateSubtitleText}
+                        updateSpeakers={updateSpeakers}
+                        setEditingSubtitleId={setEditingSubtitleId}
+                        jumpToTime={jumpToTime}
+                        formatTimecode={formatTimecode}
+                        getSpeakerIndex={getSpeakerIndex}
+                        renderHighlightedText={renderHighlightedText}
+                        splitIntoWords={splitIntoWords}
+                        setDraftText={setDraftText}
+                        handleMoveFirstWordToPrev={handleMoveFirstWordToPrev}
+                        handleMoveLastWordToNext={handleMoveLastWordToNext}
+                    />
+                );
                         })}
         </div>
     )

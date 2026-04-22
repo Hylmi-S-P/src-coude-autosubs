@@ -6,6 +6,9 @@ import { cn } from "@/lib/utils"
 // Format: { THEME_NAME: CSS_SELECTOR }
 const THEMES = { light: "", dark: ".dark" } as const
 
+const sanitizeIdentifier = (str: string) => str.replace(/[^a-zA-Z0-9-_]/g, "")
+const sanitizeValue = (str: string) => str.replace(/[;{}\\\<]/g, "")
+
 export type ChartConfig = {
   [k in string]: {
     label?: React.ReactNode
@@ -74,27 +77,29 @@ const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
     return null
   }
 
+  const sanitizedId = sanitizeIdentifier(id)
+
   return (
-    <style
-      dangerouslySetInnerHTML={{
-        __html: Object.entries(THEMES)
-          .map(
-            ([theme, prefix]) => `
-${prefix} [data-chart=${id}] {
+    <style>
+      {Object.entries(THEMES)
+        .map(
+          ([theme, prefix]) => `
+${prefix} [data-chart=${sanitizedId}] {
 ${colorConfig
   .map(([key, itemConfig]) => {
     const color =
       itemConfig.theme?.[theme as keyof typeof itemConfig.theme] ||
       itemConfig.color
-    return color ? `  --color-${key}: ${color};` : null
+    return color
+      ? `  --color-${sanitizeIdentifier(key)}: ${sanitizeValue(color)};`
+      : null
   })
   .join("\n")}
 }
 `
-          )
-          .join("\n"),
-      }}
-    />
+        )
+        .join("\n")}
+    </style>
   )
 }
 

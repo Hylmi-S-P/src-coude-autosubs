@@ -15,6 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::borrow::Cow;
 use crate::types::{WordTimestamp, Segment};
 use unicode_segmentation::UnicodeSegmentation;
 use once_cell::sync::Lazy;
@@ -29,13 +30,13 @@ static PUNCT_RE: Lazy<Regex> =
 
 /// Internal working token type used during processing.
 #[derive(Clone, Debug)]
-struct Tok {
-    pub word: String,
-    pub punc: String,
+struct Tok<'a> {
+    pub word: Cow<'a, str>,
+    pub punc: Cow<'a, str>,
     pub start: f64,
     pub end: f64,
     pub prob: Option<f32>,
-    pub speaker: Option<String>,
+    pub speaker: Option<&'a str>,
     pub leading_space: bool, // whether original token text began with a space/newline
 }
 
@@ -230,49 +231,26 @@ pub fn process_segments(
     segments: &[Segment],
     cfg: &PostProcessConfig,
 ) -> Vec<Segment> {
-    // 1) Collect words from all segments, keep speaker_id continuity.
-    let mut all: Vec<(Option<String>, WordTimestamp)> = Vec::new();
+    // 1) Collect words from all segments and normalize tokens in one pass
+    //    Separate trailing punctuation for split logic.
+
+    let total_words: usize = segments.iter().map(|s| s.words.as_ref().map(|w| w.len()).unwrap_or(1)).sum();
+    let mut toks: Vec<Tok> = Vec::with_capacity(total_words);
+
     for seg in segments {
-        let speaker = seg.speaker_id.clone();
+        let speaker = seg.speaker_id.as_deref();
         if let Some(ws) = &seg.words {
             for w in ws {
-                all.push((speaker.clone(), w.clone()));
+                process_word_to_toks(&mut toks, &w.text, w.start, w.end, w.probability, speaker);
             }
         } else {
             // fallback: treat the whole segment as one word if needed
             if !seg.text.trim().is_empty() {
-                all.push((speaker.clone(), WordTimestamp {
-                    text: seg.text.clone(), start: seg.start, end: seg.end, probability: None,
-                }));
+                process_word_to_toks(&mut toks, &seg.text, seg.start, seg.end, None, speaker);
             }
         }
     }
-    if all.is_empty() { return Vec::new(); }
-
-    // 2) Normalize tokens: separate trailing punctuation for split logic.
-
-    let mut toks: Vec<Tok> = Vec::with_capacity(all.len());
-    for (speaker, w) in all.into_iter() {
-        let (core_raw, punc_raw) = split_trailing_punct(&w.text);
-        // Capture whether this token originally had a leading space/newline indicator
-        let leading_space = core_raw.starts_with(' ') || core_raw.starts_with('\n');
-        // Trim those indicators from core so rendering can decide spacing
-        let core_trimmed = core_raw.trim_start_matches(|c| c == ' ' || c == '\n');
-        let (core, punc) = (core_trimmed, punc_raw);
-        // Remove Unicode replacement characters that may appear due to lossy decoding
-        let core = core.replace('\u{FFFD}', "");
-        let punc = punc.replace('\u{FFFD}', "");
-        if core.is_empty() && punc.is_empty() { continue; }
-        toks.push(Tok {
-            word: core.to_string(),
-            punc: punc.to_string(),
-            start: w.start,
-            end: w.end,
-            prob: w.probability,
-            speaker,
-            leading_space,
-        });
-    }
+    if toks.is_empty() { return Vec::new(); }
 
     // 3) Merge subword continuation pieces (right token without leading space) into the previous token.
     merge_continuations(&mut toks);
@@ -361,6 +339,48 @@ fn censored_replacement(clean: &str) -> String {
     }
 }
 
+fn process_word_to_toks<'a>(
+    toks: &mut Vec<Tok<'a>>,
+    text: &'a str,
+    start: f64,
+    end: f64,
+    prob: Option<f32>,
+    speaker: Option<&'a str>,
+) {
+    let (core_raw, punc_raw) = split_trailing_punct(text);
+    // Capture whether this token originally had a leading space/newline indicator
+    let leading_space = core_raw.starts_with(' ') || core_raw.starts_with('\n');
+    // Trim those indicators from core so rendering can decide spacing
+    let core_trimmed = core_raw.trim_start_matches(|c| c == ' ' || c == '\n');
+
+    // Remove Unicode replacement characters that may appear due to lossy decoding
+    // If the word contains replacement characters, we MUST allocate a new String.
+    // Otherwise, we can keep the original reference.
+    let word = if core_trimmed.contains('\u{FFFD}') {
+        Cow::Owned(core_trimmed.replace('\u{FFFD}', ""))
+    } else {
+        Cow::Borrowed(core_trimmed)
+    };
+
+    let punc = if punc_raw.contains('\u{FFFD}') {
+        Cow::Owned(punc_raw.replace('\u{FFFD}', ""))
+    } else {
+        Cow::Borrowed(punc_raw)
+    };
+
+    if word.is_empty() && punc.is_empty() { return; }
+
+    toks.push(Tok {
+        word,
+        punc,
+        start,
+        end,
+        prob,
+        speaker,
+        leading_space,
+    });
+}
+
 /// Lowercase then uppercase the first letter of every "word" (separated by non-word chars).
 /// Mirrors JS `.toLocaleLowerCase().replace(/\b\w/g, c => c.toUpperCase())`.
 fn titlecase_latin(s: &str) -> String {
@@ -395,9 +415,9 @@ fn apply_content_formatting(t: &mut Tok, cfg: &PostProcessConfig, censor_set: &H
                 new_word.push_str(&t.word[..idx]);
                 new_word.push_str(&replacement);
                 new_word.push_str(&t.word[idx + clean_trim.len()..]);
-                t.word = new_word;
+                t.word = Cow::Owned(new_word);
             } else {
-                t.word = replacement;
+                t.word = Cow::Owned(replacement);
             }
         }
     }
@@ -405,18 +425,18 @@ fn apply_content_formatting(t: &mut Tok, cfg: &PostProcessConfig, censor_set: &H
     // 2) Remove punctuation: clear the trailing punctuation field and strip any
     //    non-letter/digit/whitespace/apostrophe characters from the word body.
     if cfg.remove_punctuation {
-        t.punc.clear();
+        t.punc = Cow::Borrowed("");
         if !t.word.is_empty() {
-            t.word = strip_punct_chars(&t.word);
+            t.word = Cow::Owned(strip_punct_chars(&t.word));
         }
     }
 
     // 3) Apply case transform to the word (punctuation is case-insensitive in practice).
     match cfg.text_case {
         TextCase::None => {}
-        TextCase::Lowercase => { t.word = t.word.to_lowercase(); }
-        TextCase::Uppercase => { t.word = t.word.to_uppercase(); }
-        TextCase::Titlecase => { t.word = titlecase_latin(&t.word); }
+        TextCase::Lowercase => { t.word = Cow::Owned(t.word.to_lowercase()); }
+        TextCase::Uppercase => { t.word = Cow::Owned(t.word.to_uppercase()); }
+        TextCase::Titlecase => { t.word = Cow::Owned(titlecase_latin(&t.word)); }
     }
 }
 
@@ -428,17 +448,17 @@ fn is_ascii_word(s: &str) -> bool {
 /// Merge tokens where the right token is a continuation piece (no leading space)
 /// and both sides look like ASCII words (Latin). This avoids outputs like
 /// "trans" + "human" + "ism" and instead yields "transhumanism".
-fn merge_continuations(toks: &mut Vec<Tok>) {
+fn merge_continuations<'a>(toks: &mut Vec<Tok<'a>>) {
     if toks.is_empty() { return; }
-    let mut out: Vec<Tok> = Vec::with_capacity(toks.len());
+    let mut out: Vec<Tok<'a>> = Vec::with_capacity(toks.len());
     for t in std::mem::take(toks).into_iter() {
         if let Some(prev) = out.last_mut() {
             // Case 1: punctuation-only token -> merge into previous token
             if t.word.is_empty() && !t.punc.is_empty() {
                 // Append punctuation to previous without adding space
-                let merged = join_tokens(prev, &t, /*insert_space*/ false);
-                prev.word = merged.0;
-                prev.punc = merged.1;
+                let (word, punc, _) = join_tokens(prev, &t, /*insert_space*/ false);
+                prev.word = Cow::Owned(word);
+                prev.punc = Cow::Owned(punc);
                 prev.end = prev.end.max(t.end);
                 continue;
             }
@@ -449,9 +469,9 @@ fn merge_continuations(toks: &mut Vec<Tok>) {
             let tiny_gap = (t.start - prev.end) <= 0.03;
             if right_cont && both_ascii_word && no_prev_punc && tiny_gap {
                 // Merge t into prev without inserting a space
-                let merged = join_tokens(prev, &t, /*insert_space*/ false);
-                prev.word = merged.0;
-                prev.punc = merged.1;
+                let (word, punc, _) = join_tokens(prev, &t, /*insert_space*/ false);
+                prev.word = Cow::Owned(word);
+                prev.punc = Cow::Owned(punc);
                 prev.end = prev.end.max(t.end);
                 // leading_space remains from prev (merged.2)
                 continue;
@@ -481,7 +501,7 @@ fn is_terminal_punct(p: &str) -> bool {
 
 fn is_comma_like(p: &str) -> bool { matches!(p, "," | "，" | "、" | ";") }
 
-fn clamp_and_merge_tiny_words(toks: &mut Vec<Tok>, cfg: &PostProcessConfig) {
+fn clamp_and_merge_tiny_words<'a>(toks: &mut Vec<Tok<'a>>, cfg: &PostProcessConfig) {
     if toks.is_empty() { return; }
 
     // First pass: expand tokens that are shorter than min_word_dur.
@@ -505,7 +525,7 @@ fn clamp_and_merge_tiny_words(toks: &mut Vec<Tok>, cfg: &PostProcessConfig) {
     }
 
     // Second pass: merge very tiny words with neighbors (prefer next)
-    let mut out: Vec<Tok> = Vec::with_capacity(toks.len());
+    let mut out: Vec<Tok<'a>> = Vec::with_capacity(toks.len());
     let mut i = 0;
     while i < toks.len() {
         let dur = toks[i].end - toks[i].start;
@@ -513,8 +533,8 @@ fn clamp_and_merge_tiny_words(toks: &mut Vec<Tok>, cfg: &PostProcessConfig) {
             // merge i into i+1
             let mut next = toks[i + 1].clone();
             let merged_word = join_tokens(&toks[i], &next, cfg.insert_interword_space);
-            next.word = merged_word.0;
-            next.punc = merged_word.1;
+            next.word = Cow::Owned(merged_word.0);
+            next.punc = Cow::Owned(merged_word.1);
             next.start = toks[i].start.min(next.start);
             next.leading_space = merged_word.2;
             out.push(next);
@@ -523,8 +543,8 @@ fn clamp_and_merge_tiny_words(toks: &mut Vec<Tok>, cfg: &PostProcessConfig) {
             // merge into previous
             let mut prev = out.pop().unwrap();
             let merged_word = join_tokens(&prev, &toks[i], cfg.insert_interword_space);
-            prev.word = merged_word.0;
-            prev.punc = merged_word.1;
+            prev.word = Cow::Owned(merged_word.0);
+            prev.punc = Cow::Owned(merged_word.1);
             prev.end = prev.end.max(toks[i].end);
             prev.leading_space = merged_word.2;
             out.push(prev);
@@ -537,7 +557,7 @@ fn clamp_and_merge_tiny_words(toks: &mut Vec<Tok>, cfg: &PostProcessConfig) {
     *toks = out;
 }
 
-fn join_tokens(a: &Tok, b: &Tok, insert_space: bool) -> (String, String, bool) {
+fn join_tokens(a: &Tok<'_>, b: &Tok<'_>, insert_space: bool) -> (String, String, bool) {
     let mut s = String::new();
     if !a.word.is_empty() { s.push_str(&a.word); }
     if !a.punc.is_empty() { s.push_str(&a.punc); }
@@ -548,7 +568,7 @@ fn join_tokens(a: &Tok, b: &Tok, insert_space: bool) -> (String, String, bool) {
     (s, p, a.leading_space)
 }
 
-fn render_token(t: &Tok) -> String {
+fn render_token(t: &Tok<'_>) -> String {
     let mut s = String::new();
     if t.leading_space { s.push(' '); }
     s.push_str(&t.word);
@@ -556,7 +576,7 @@ fn render_token(t: &Tok) -> String {
     s
 }
 
-fn render_slice(slice: &[Tok], cfg: &PostProcessConfig) -> String {
+fn render_slice(slice: &[Tok<'_>], cfg: &PostProcessConfig) -> String {
     let mut s = String::new();
     for (i, t) in slice.iter().enumerate() {
         if cfg.insert_interword_space && t.leading_space && i > 0 { s.push(' '); }
@@ -566,7 +586,7 @@ fn render_slice(slice: &[Tok], cfg: &PostProcessConfig) -> String {
     s
 }
 
-fn slice_chars(slice: &[Tok], cfg: &PostProcessConfig) -> usize {
+fn slice_chars(slice: &[Tok<'_>], cfg: &PostProcessConfig) -> usize {
     let core_len: usize = if cfg.use_grapheme_len {
         slice.iter().map(|t| UnicodeSegmentation::graphemes(t.word.as_str(), true).count() + UnicodeSegmentation::graphemes(t.punc.as_str(), true).count()).sum()
     } else {
@@ -576,7 +596,7 @@ fn slice_chars(slice: &[Tok], cfg: &PostProcessConfig) -> usize {
     core_len + spaces
 }
 
-fn tok_chars(t: &Tok, cfg: &PostProcessConfig) -> usize {
+fn tok_chars(t: &Tok<'_>, cfg: &PostProcessConfig) -> usize {
     if cfg.use_grapheme_len {
         UnicodeSegmentation::graphemes(t.word.as_str(), true).count()
             + UnicodeSegmentation::graphemes(t.punc.as_str(), true).count()
@@ -630,11 +650,11 @@ fn is_function_word(word: &str, lang: &str) -> bool {
 /// Proactively breaks at natural points (conjunctions, prepositions, commas)
 /// when the line is sufficiently full, to avoid orphan lines.
 /// Also force line breaks on speaker change and after terminal punctuation.
-fn wrap_into_lines(toks: &[Tok], cfg: &PostProcessConfig) -> Vec<Vec<Tok>> {
+fn wrap_into_lines<'a>(toks: &[Tok<'a>], cfg: &PostProcessConfig) -> Vec<Vec<Tok<'a>>> {
     if toks.is_empty() { return Vec::new(); }
 
-    let mut lines: Vec<Vec<Tok>> = Vec::new();
-    let mut cur: Vec<Tok> = Vec::new();
+    let mut lines: Vec<Vec<Tok<'a>>> = Vec::new();
+    let mut cur: Vec<Tok<'a>> = Vec::new();
     let mut cur_chars: usize = 0;
 
     // Threshold for proactive breaking: break at natural points when line is this full.
@@ -730,7 +750,7 @@ fn wrap_into_lines(toks: &[Tok], cfg: &PostProcessConfig) -> Vec<Vec<Tok>> {
 /// 3. Before a language-aware function word (conjunctions, prepositions, etc.)
 /// 4. At a long pause (gap >= split_gap_sec)
 /// 5. Fallback: break at the end (keep entire line)
-fn find_best_break(line: &[Tok], cfg: &PostProcessConfig) -> usize {
+fn find_best_break(line: &[Tok<'_>], cfg: &PostProcessConfig) -> usize {
     // Priority 1: After terminal punctuation
     for i in (1..line.len()).rev() {
         if is_terminal_punct(&line[i - 1].punc) {
@@ -762,7 +782,7 @@ fn find_best_break(line: &[Tok], cfg: &PostProcessConfig) -> usize {
 
 /// Fallback break: find a position closest to 60% of CPL for a balanced split.
 /// Used when find_best_break finds no natural break point.
-fn find_balanced_break(line: &[Tok], cfg: &PostProcessConfig) -> usize {
+fn find_balanced_break(line: &[Tok<'_>], cfg: &PostProcessConfig) -> usize {
     if line.len() <= 1 { return line.len(); }
 
     let target = (cfg.max_chars_per_line as f64 * 0.6) as usize;
@@ -803,7 +823,7 @@ fn violates_kinsoku_start(c: char) -> bool {
 /// Apply kinsoku adjustment to a break index within a line.
 /// If the first character of the token at `break_idx` would violate kinsoku start rules,
 /// shift the break forward by one (pull that token onto the previous line) to fix it.
-fn adjust_kinsoku(line: &[Tok], break_idx: usize) -> usize {
+fn adjust_kinsoku(line: &[Tok<'_>], break_idx: usize) -> usize {
     if break_idx >= line.len() || break_idx == 0 { return break_idx; }
     // Check the first character of the token that would start the new line
     let first_char = line[break_idx].word.chars().next()
@@ -818,18 +838,18 @@ fn adjust_kinsoku(line: &[Tok], break_idx: usize) -> usize {
 }
 
 /// Bundle consecutive lines into subtitle cues, respecting max_lines and speaker boundaries.
-fn group_lines_into_cues(lines: Vec<Vec<Tok>>, cfg: &PostProcessConfig) -> Vec<Segment> {
+fn group_lines_into_cues<'a>(lines: Vec<Vec<Tok<'a>>>, cfg: &PostProcessConfig) -> Vec<Segment> {
     let mut cues: Vec<Segment> = Vec::new();
     let mut i = 0;
 
     while i < lines.len() {
-        let mut cue_lines: Vec<&Vec<Tok>> = vec![&lines[i]];
-        let cue_speaker = lines[i].first().and_then(|t| t.speaker.clone());
+        let mut cue_lines: Vec<&Vec<Tok<'a>>> = vec![&lines[i]];
+        let cue_speaker = lines[i].first().and_then(|t| t.speaker);
         let mut j = i + 1;
 
         while cue_lines.len() < cfg.max_lines && j < lines.len() {
             // Don't mix speakers in one cue
-            let next_speaker = lines[j].first().and_then(|t| t.speaker.clone());
+            let next_speaker = lines[j].first().and_then(|t| t.speaker);
             if next_speaker != cue_speaker {
                 break;
             }
@@ -838,7 +858,7 @@ fn group_lines_into_cues(lines: Vec<Vec<Tok>>, cfg: &PostProcessConfig) -> Vec<S
         }
 
         // Build the Segment
-        let all_toks: Vec<&Tok> = cue_lines.iter().flat_map(|l| l.iter()).collect();
+        let all_toks: Vec<&Tok<'a>> = cue_lines.iter().flat_map(|l| l.iter()).collect();
         let start = all_toks.first().map(|t| t.start).unwrap_or(0.0);
         let end = all_toks.last().map(|t| t.end).unwrap_or(start);
 
@@ -861,7 +881,7 @@ fn group_lines_into_cues(lines: Vec<Vec<Tok>>, cfg: &PostProcessConfig) -> Vec<S
             end: round3(end),
             text,
             words: Some(words),
-            speaker_id: cue_speaker,
+            speaker_id: cue_speaker.map(|s| s.to_string()),
         });
 
         i = j;

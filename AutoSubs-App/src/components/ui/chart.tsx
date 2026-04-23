@@ -65,6 +65,22 @@ const ChartContainer = React.forwardRef<
 })
 ChartContainer.displayName = "Chart"
 
+/**
+ * Sanitizes a string to be used as a CSS identifier.
+ * Allows only alphanumeric characters, hyphens, and underscores.
+ */
+export function sanitizeId(id: string) {
+  return id.replace(/[^a-zA-Z0-9-_]/g, "")
+}
+
+/**
+ * Sanitizes a string to be used as a CSS value.
+ * Strips characters that could be used to break out of the CSS context or inject scripts.
+ */
+export function sanitizeValue(value: string) {
+  return value.replace(/[;{}\\\<\>]/g, "")
+}
+
 const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
   const colorConfig = Object.entries(config).filter(
     ([_, config]) => config.theme || config.color
@@ -74,19 +90,21 @@ const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
     return null
   }
 
+  const sanitizedId = sanitizeId(id)
+
   return (
     <style
       dangerouslySetInnerHTML={{
         __html: Object.entries(THEMES)
           .map(
             ([theme, prefix]) => `
-${prefix} [data-chart=${id}] {
+${prefix} [data-chart=${sanitizedId}] {
 ${colorConfig
   .map(([key, itemConfig]) => {
     const color =
       itemConfig.theme?.[theme as keyof typeof itemConfig.theme] ||
       itemConfig.color
-    return color ? `  --color-${key}: ${color};` : null
+    return color ? `  --color-${sanitizeId(key)}: ${sanitizeValue(color)};` : null
   })
   .join("\n")}
 }

@@ -167,8 +167,9 @@ export function AddToTimelineDialog({
                 setSelection((s) => ({ ...s, presetId: created.id }))
             }
             setCreateSession({ kind: "closed" })
-        } catch (err: any) {
-            toast.error(err?.message ?? "Failed to save preset")
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : "Failed to save preset"
+            toast.error(message)
         }
     }
 

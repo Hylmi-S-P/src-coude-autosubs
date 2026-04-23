@@ -93,8 +93,9 @@ export function AnimatedPresetPicker({
             const json = await readTextFile(file as string)
             await onImportJson(json)
             toast.success(t("addToTimeline.preset.import"))
-        } catch (err: any) {
-            toast.error(err?.message ?? t("addToTimeline.preset.errors.invalidJson"))
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : t("addToTimeline.preset.errors.invalidJson")
+            toast.error(message)
         }
     }
 
@@ -105,8 +106,9 @@ export function AnimatedPresetPicker({
             setPasteOpen(false)
             setPasteValue("")
             toast.success(t("addToTimeline.preset.import"))
-        } catch (err: any) {
-            setPasteError(err?.message ?? t("addToTimeline.preset.errors.invalidJson"))
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : t("addToTimeline.preset.errors.invalidJson")
+            setPasteError(message)
         }
     }
 
@@ -121,8 +123,9 @@ export function AnimatedPresetPicker({
             if (!target) return
             await writeTextFile(target, json)
             toast.success(t("addToTimeline.preset.export"))
-        } catch (err: any) {
-            toast.error(err?.message ?? "Export failed")
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : "Export failed"
+            toast.error(message)
         }
     }
 
